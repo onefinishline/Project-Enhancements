@@ -41,6 +41,20 @@ and signed-out visitors can't request to work on them.
 - A database from the first version is upgraded automatically on start: old staff accounts become staff users with
   the same passwords.
 
+## Security
+- **SQL injection:** every query passes user input as a parameter (`?`), never as part of the SQL text.
+- **Script injection (XSS):** React shows all stored text as text; nothing uses `dangerouslySetInnerHTML`.
+  A Content-Security-Policy header also stops the browser running any script not served from this site.
+- **Input rules** (`src/server.js`): every field is trimmed, length-limited and type-checked; invisible control
+  characters are removed (and line breaks, except in the long description fields). Emails must be plain
+  addresses, account names may only contain letters, spaces and `. , ' -`, and yes/no, choice, number and
+  date fields only accept their allowed values.
+- **Forged requests (CSRF):** data-changing requests must be JSON from this site's own origin, and the session
+  cookie is `HttpOnly; SameSite=Strict` (plus `Secure` in production).
+- **Other headers:** no framing (clickjacking), `nosniff`, HSTS in production. Errors never return stack traces.
+- Passwords are hashed with scrypt; session and email-link tokens are stored only as SHA-256 hashes.
+- Run `npm audit` and `npm --prefix client audit` before deploying.
+
 ## Run
 ```bash
 npm install

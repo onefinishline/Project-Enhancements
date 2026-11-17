@@ -35,7 +35,9 @@ function readCookie(req, name) {
   const header = req.headers.cookie || '';
   for (const part of header.split(';')) {
     const i = part.indexOf('=');
-    if (i > 0 && part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim());
+    if (i > 0 && part.slice(0, i).trim() === name) {
+      try { return decodeURIComponent(part.slice(i + 1).trim()); } catch { return null; } // malformed cookie = signed out
+    }
   }
   return null;
 }
