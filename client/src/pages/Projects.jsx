@@ -54,12 +54,12 @@ export default function Projects({ user }) {
         </select>
       </div>
 
-      {!isStaff && (
+      {user === null && (
         <p className="muted small">
-          Only authorized staff can verify projects.
-          {user === null && <> <Link to="/signin">Sign in</Link> to see all projects (some are shown only to signed-in users) and to have your details filled in when you request a project.</>}
+          Anyone can browse these projects and request to work on one. No account needed.
         </p>
       )}
+      {user && !isStaff && <p className="muted small">Only authorized staff can verify projects.</p>}
       {error && <p className="error" role="alert">{error}</p>}
       {projects === null && !error && <p className="muted">Loading…</p>}
       {projects && shown.length === 0 && (
