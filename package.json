@@ -9,13 +9,15 @@
     "dev": "node --env-file-if-exists=.env --watch src/server.js",
     "dev:client": "npm --prefix client run dev",
     "build": "npm --prefix client install && npm --prefix client run build",
-    "make-staff": "node --env-file-if-exists=.env scripts/make-staff.js"
+    "make-staff": "node --env-file-if-exists=.env scripts/make-staff.js",
+    "import-sqlite": "node --env-file-if-exists=.env scripts/import-sqlite.js"
   },
   "engines": {
     "node": ">=22.13"
   },
   "dependencies": {
     "express": "^4.21.2",
-    "nodemailer": "^10.6.0"
+    "nodemailer": "^10.6.0",
+    "pg": "^8.23.1"
   }
 }
