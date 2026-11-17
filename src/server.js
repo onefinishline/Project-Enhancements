@@ -13,10 +13,43 @@ const SECURE_COOKIES = process.env.NODE_ENV === 'production';
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '100kb' }));
+// Content-Security-Policy: the browser only runs this site's own script files (never inline or injected code),
+// and only loads styles and fonts from here and Google Fonts. A second guard if text ever slipped through as HTML.
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
 app.use((_req, res, next) => {
+  res.setHeader('Content-Security-Policy', CSP);
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+  if (SECURE_COOKIES) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
+
+// Requests that change data must be JSON and come from this site. A form or script on another website
+// can't send JSON here without the browser asking permission first (which this server never gives),
+// and a mismatched Origin header is refused outright.
+app.use('/api', (req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+  if (!req.is('application/json')) return res.status(415).json({ error: 'Requests must be sent as JSON.' });
+  const origin = req.get('origin');
+  if (origin) {
+    let host = null;
+    try { host = new URL(origin).host; } catch { /* malformed: refused below */ }
+    if (host !== req.get('host')) return res.status(403).json({ error: 'Request refused.' });
+  }
   next();
 });
 app.use(auth.loadUser);
@@ -38,16 +71,36 @@ const loginLimiter = rateLimit({ windowMs: 15 * 60e3, max: 10 });
 const submitLimiter = rateLimit({ windowMs: 60 * 60e3, max: 30 });
 
 // ---- input helpers ----------------------------------------------------------
+// Every field is checked here before it is stored. Values are always saved through query parameters
+// (never pasted into SQL) and React shows them as plain text, so these rules are an extra layer on top.
 class InputError extends Error {}
-function text(body, field, label, { max = 200, required = false } = {}) {
-  const v = typeof body[field] === 'string' ? body[field].trim() : '';
+// Invisible control characters (and, for one-line fields, line breaks) are removed, so text can't carry
+// hidden commands, break into email headers or disguise itself. Only real text is kept.
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F​-‏‪-‮⁦-⁩﻿]/g;
+function text(body, field, label, { max = 200, required = false, multiline = false } = {}) {
+  let v = typeof body[field] === 'string' ? body[field] : '';
+  v = v.normalize('NFC').replace(CONTROL_CHARS, '');
+  v = multiline ? v.replace(/\r\n?/g, '\n').replace(/\n{4,}/g, '\n\n\n') : v.replace(/[\r\n\t]+/g, ' ');
+  v = v.trim();
   if (required && !v) throw new InputError(`${label} is required.`);
   if (v.length > max) throw new InputError(`${label} must be ${max} characters or fewer.`);
   return v || null;
 }
+// Plain addresses only (name@example.org): no spaces, quotes, angle brackets or other characters that
+// could add recipients or extra parts to a mailto: link.
+const EMAIL_RE = /^[A-Za-z0-9.!#$%&'*+\/=^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 function email(body, field, label) {
   const v = text(body, field, label, { max: 254 });
-  if (v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) throw new InputError(`${label} is not a valid email address.`);
+  if (v && (!EMAIL_RE.test(v) || v.includes('..'))) throw new InputError(`${label} is not a valid email address.`);
+  return v;
+}
+// People's names: letters (any language), spaces and . , ' - only. Account names go into emails sent to
+// that address, so they must not carry links or markup.
+function personName(body, field, label, opts) {
+  const v = text(body, field, label, { max: 120, ...opts });
+  if (v && !/^[\p{L}\p{M}][\p{L}\p{M} .,'’-]*$/u.test(v)) {
+    throw new InputError(`${label} can only contain letters, spaces and . , ' -`);
+  }
   return v;
 }
 function date(body, field, label) {
@@ -145,7 +198,7 @@ function requireMail(_req, res, next) {
 app.get('/api/auth/me', (req, res) => res.json({ user: req.user || null, domain: auth.ALLOWED_DOMAIN }));
 
 app.post('/api/auth/register', registerLimiter, requireMail, handle('AUTH', (req, res) => {
-  const name = text(req.body, 'name', 'Your name', { required: true, max: 120 });
+  const name = personName(req.body, 'name', 'Your name', { required: true });
   const em = (email(req.body, 'email', 'Email') || '').toLowerCase();
   if (!em) throw new InputError('Email is required.');
   if (!auth.isAllowedEmail(em)) throw new InputError(`Use your @${auth.ALLOWED_DOMAIN} email address.`);
@@ -178,7 +231,7 @@ app.get('/api/auth/token', tokenLimiter, (req, res) => {
 
 app.post('/api/auth/set-password', tokenLimiter, handle('AUTH', (req, res) => {
   const pw = password(req.body);
-  const name = text(req.body, 'name', 'Your name', { max: 120 });
+  const name = personName(req.body, 'name', 'Your name');
   const info = auth.consumeEmailToken(req.body.token);
   if (!info) return res.status(400).json({ error: 'This link is invalid or has expired. Please request a new one.' });
   db.prepare(`
@@ -244,7 +297,7 @@ app.post('/api/projects', submitLimiter, auth.requireUser, handle('PROJECTS', (r
     name: text(b, 'name', 'Project name', { required: true }),
     parent_project: text(b, 'parent_project', 'Larger project'),
     short_description: text(b, 'short_description', 'Short project description', { required: true, max: 300 }),
-    details: text(b, 'details', 'Full project description', { required: true, max: 5000 }),
+    details: text(b, 'details', 'Full project description', { required: true, max: 5000, multiline: true }),
     submitter: text(b, 'submitter', 'Submitter', { required: true }),
     submitter_email: email(b, 'submitter_email', 'Submitter email'),
     submitter_phone: phone(b, 'submitter_phone', 'Submitter phone number'),
@@ -253,12 +306,12 @@ app.post('/api/projects', submitLimiter, auth.requireUser, handle('PROJECTS', (r
     backend_languages: text(b, 'backend_languages', 'Desktop and backend languages', { max: 500 }),
     frontend_libraries: text(b, 'frontend_libraries', 'Front-end libraries', { max: 500 }),
     mobile_languages: text(b, 'mobile_languages', 'Mobile languages', { max: 500 }),
-    copyright_handling: text(b, 'copyright_handling', 'How copyrights should be handled', { required: true, max: 2000 }),
+    copyright_handling: text(b, 'copyright_handling', 'How copyrights should be handled', { required: true, max: 2000, multiline: true }),
     multiple_teams: multipleTeams,
-    multiple_teams_note: text(b, 'multiple_teams_note', 'Explanation of whether more than one team can work on it', { required: true, max: 2000 }),
+    multiple_teams_note: text(b, 'multiple_teams_note', 'Explanation of whether more than one team can work on it', { required: true, max: 2000, multiline: true }),
     security_sensitive: securitySensitive,
     security_note: securitySensitive
-      ? text(b, 'security_note', 'What makes it security-sensitive', { required: true, max: 2000 })
+      ? text(b, 'security_note', 'What makes it security-sensitive', { required: true, max: 2000, multiline: true })
       : null,
     promo_use: oneOf(b, 'promo_use', 'Use in promotional material', PROMO_CHOICES, { required: true }),
     created_by: req.user.id,
@@ -289,7 +342,7 @@ app.post('/api/projects/:id/requests', submitLimiter, handle('REQUESTS', (req, r
   }
   const b = req.body || {};
   const organization = text(b, 'organization', 'Team or organization', { required: true });
-  const participants = text(b, 'participants', 'Participant names', { required: true, max: 2000 });
+  const participants = text(b, 'participants', 'Participant names', { required: true, max: 2000, multiline: true });
   const start = date(b, 'start_date', 'Start date');
   const end = date(b, 'end_date', 'End date');
   const timeframe = text(b, 'timeframe', 'Timeframe', { max: 500 });
@@ -312,6 +365,16 @@ if (fs.existsSync(dist)) {
 } else {
   app.get('/', (_req, res) => res.type('text').send('API running. Build the client (npm run build) or use the Vite dev server on :5173.'));
 }
+
+// Malformed or oversized request bodies get a short JSON error; no stack traces or internals are ever sent.
+app.use((err, _req, res, _next) => {
+  const status = err.status || err.statusCode || 500;
+  if (status >= 500) console.error('[SERVER]', err);
+  const message = err.type === 'entity.too.large' ? 'That request is too large.'
+    : status === 400 ? 'The request could not be read.'
+    : 'Something went wrong. Please try again.';
+  res.status(status >= 400 && status < 600 ? status : 500).json({ error: message });
+});
 
 app.listen(PORT, () => {
   console.log(`[SERVER] Project Enhancements on http://localhost:${PORT}`);
