@@ -2,7 +2,7 @@
 
 Collects enhancement proposals for current projects and connects them with teams who want to build them.
 
-- **Backend:** Node.js + Express (`src/server.js`), SQLite via Node's built-in `node:sqlite` (`data/enhancements.db`). Requires Node 22.13+.
+- **Backend:** Node.js + Express (`src/server.js`), PostgreSQL via `pg` (`src/db.js`; tables are created on start). Requires Node 22.13+ and PostgreSQL 13+.
 - **Frontend:** React 18 + Vite + React Router (`client/`). Production build goes to `client/dist`, served by Express.
 
 ## Branding
@@ -38,11 +38,9 @@ and signed-out visitors can't request to work on them.
   npm run make-staff -- someone@sil.org --remove   # revoke
   npm run make-staff -- --list
   ```
-- A database from the first version is upgraded automatically on start: old staff accounts become staff users with
-  the same passwords.
 
 ## Security
-- **SQL injection:** every query passes user input as a parameter (`?`), never as part of the SQL text.
+- **SQL injection:** every query passes user input as a numbered parameter (`$1`, `$2`, ...), never as part of the SQL text.
 - **Script injection (XSS):** React shows all stored text as text; nothing uses `dangerouslySetInnerHTML`.
   A Content-Security-Policy header also stops the browser running any script not served from this site.
 - **Input rules** (`src/server.js`): every field is trimmed, length-limited and type-checked; invisible control
@@ -56,17 +54,24 @@ and signed-out visitors can't request to work on them.
 - Run `npm audit` and `npm --prefix client audit` before deploying.
 
 ## Run
+Create an empty PostgreSQL database and a user that owns it, and put its address in `DATABASE_URL`. Then:
 ```bash
 npm install
 npm run build          # installs and builds the React client
 npm start              # http://localhost:3100
 ```
 
+### Moving data from the old SQLite version
+The app used to keep its data in `data/enhancements.db` (SQLite). To copy all of it (accounts, staff, projects,
+requests) into a new, empty PostgreSQL database, run once: `npm run import-sqlite`. It refuses to run if
+PostgreSQL already has data, and never changes the SQLite file.
+
 Development (hot reload): `npm run dev` (API on :3100) and `npm run dev:client` (Vite on :5173, proxies `/api`).
 
 ## Config (`.env`, see `.env.example`)
 `npm start` / `npm run dev` read `.env` automatically.
-- `PORT` (default 3100), `DB_PATH` (default `data/enhancements.db`), `ALLOWED_EMAIL_DOMAIN` (default `sil.org`).
+- `DATABASE_URL` (**required**): `postgres://USER:PASSWORD@HOST:5432/DATABASE`. Set `PGSSL=true` if the server requires TLS.
+- `PORT` (default 3100), `ALLOWED_EMAIL_DOMAIN` (default `sil.org`).
 - `APP_URL`: the site's public address, used in emailed links. **Required in production.**
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM`: same meaning as in RecruitFlow.
   Without `SMTP_HOST`, account emails are printed to the server console (local testing only); in production,

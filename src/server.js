@@ -105,7 +105,13 @@ function personName(body, field, label, opts) {
 }
 function date(body, field, label) {
   const v = text(body, field, label, { max: 10 });
-  if (v && (!/^\d{4}-\d{2}-\d{2}$/.test(v) || isNaN(Date.parse(v)))) throw new InputError(`${label} must be a date.`);
+  if (!v) return v;
+  // Must be a real calendar day (rejects e.g. 2026-02-31) within a sensible range.
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  const d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  if (!m || +m[1] < 2000 || +m[1] > 2100 || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) {
+    throw new InputError(`${label} must be a date.`);
+  }
   return v;
 }
 function wholeNumber(body, field, label) {
@@ -140,12 +146,12 @@ const idParam = (req) => {
   return Number.isInteger(id) && id > 0 ? id : null;
 };
 function handle(area, fn) {
-  return (req, res) => {
-    try { fn(req, res); }
+  return async (req, res) => {
+    try { await fn(req, res); }
     catch (err) {
       if (err instanceof InputError) return res.status(400).json({ error: err.message });
       console.error(`[${area}]`, err);
-      res.status(500).json({ error: 'Something went wrong. Please try again.' });
+      if (!res.headersSent) res.status(500).json({ error: 'Something went wrong. Please try again.' });
     }
   };
 }
@@ -168,23 +174,26 @@ function password(body) {
   return pw;
 }
 
+// Started without waiting (see the end of the function), so response time doesn't reveal whether an account exists.
 function sendAccountEmail(user, kind) {
+  buildAndSendAccountEmail(user, kind)
+    .catch((err) => console.error('[MAIL] Could not send', kind, 'email:', err.message));
+}
+async function buildAndSendAccountEmail(user, kind) {
   let subject, body;
   if (kind === 'verify') {
-    const link = `${APP_URL}/set-password?token=${auth.createEmailToken(user.id, 'verify', 48)}`;
+    const link = `${APP_URL}/set-password?token=${await auth.createEmailToken(user.id, 'verify', 48)}`;
     subject = 'Finish creating your Project Enhancements account';
     body = `Hi ${user.name},\n\nTo finish creating your Project Enhancements account, open this link and choose a password:\n\n${link}\n\nThe link works once and expires in 48 hours. If you didn't ask for an account, you can ignore this email.`;
   } else if (kind === 'reset') {
-    const link = `${APP_URL}/set-password?token=${auth.createEmailToken(user.id, 'reset', 1)}`;
+    const link = `${APP_URL}/set-password?token=${await auth.createEmailToken(user.id, 'reset', 1)}`;
     subject = 'Reset your Project Enhancements password';
     body = `Hi ${user.name},\n\nTo choose a new password, open this link:\n\n${link}\n\nThe link works once and expires in 1 hour. If you didn't ask for this, you can ignore this email; your password hasn't changed.`;
   } else {
     subject = 'You already have a Project Enhancements account';
     body = `Hi ${user.name},\n\nSomeone (probably you) tried to create an account with this address, but you already have one.\nSign in at ${APP_URL}/signin. If you've forgotten your password, use "Forgot password?" there.`;
   }
-  // Sent in the background so response time doesn't reveal whether an account exists.
-  mailer.sendMail({ to: user.email, subject, text: body })
-    .catch((err) => console.error('[MAIL] Could not send', kind, 'email:', err.message));
+  await mailer.sendMail({ to: user.email, subject, text: body });
 }
 
 function requireMail(_req, res, next) {
@@ -197,78 +206,88 @@ function requireMail(_req, res, next) {
 
 app.get('/api/auth/me', (req, res) => res.json({ user: req.user || null, domain: auth.ALLOWED_DOMAIN }));
 
-app.post('/api/auth/register', registerLimiter, requireMail, handle('AUTH', (req, res) => {
+app.post('/api/auth/register', registerLimiter, requireMail, handle('AUTH', async (req, res) => {
   const name = personName(req.body, 'name', 'Your name', { required: true });
   const em = (email(req.body, 'email', 'Email') || '').toLowerCase();
   if (!em) throw new InputError('Email is required.');
   if (!auth.isAllowedEmail(em)) throw new InputError(`Use your @${auth.ALLOWED_DOMAIN} email address.`);
-  const existing = db.prepare('SELECT id, name, email, email_verified_at FROM users WHERE email = ?').get(em);
+  const existing = await db.one('SELECT id, name, email, email_verified_at FROM users WHERE lower(email) = $1', [em]);
   if (existing && existing.email_verified_at) {
     sendAccountEmail(existing, 'exists');
   } else if (existing) {
-    db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, existing.id);
+    await db.run('UPDATE users SET name = $1 WHERE id = $2', [name, existing.id]);
     sendAccountEmail({ ...existing, name }, 'verify');
   } else {
-    const r = db.prepare('INSERT INTO users (email, name, password_hash) VALUES (?, ?, ?)').run(em, name, NO_PASSWORD);
-    sendAccountEmail({ id: Number(r.lastInsertRowid), name, email: em }, 'verify');
+    // ON CONFLICT: two sign-ups for the same address at the same moment both succeed quietly.
+    const created = await db.one(`
+      INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3)
+      ON CONFLICT ((lower(email))) DO NOTHING RETURNING id`, [em, name, NO_PASSWORD]);
+    if (created) sendAccountEmail({ id: created.id, name, email: em }, 'verify');
   }
   res.json(SENT); // same answer either way, so this can't be used to find out who has an account
 }));
 
-app.post('/api/auth/forgot', forgotLimiter, requireMail, handle('AUTH', (req, res) => {
+app.post('/api/auth/forgot', forgotLimiter, requireMail, handle('AUTH', async (req, res) => {
   const em = email(req.body, 'email', 'Email');
   if (!em) throw new InputError('Email is required.');
-  const user = db.prepare('SELECT id, name, email, email_verified_at FROM users WHERE email = ?').get(em);
+  const user = await db.one('SELECT id, name, email, email_verified_at FROM users WHERE lower(email) = lower($1)', [em]);
   if (user) sendAccountEmail(user, user.email_verified_at ? 'reset' : 'verify');
   res.json(SENT);
 }));
 
-app.get('/api/auth/token', tokenLimiter, (req, res) => {
-  const info = auth.peekEmailToken(req.query.token);
+app.get('/api/auth/token', tokenLimiter, handle('AUTH', async (req, res) => {
+  const info = await auth.peekEmailToken(req.query.token);
   if (!info) return res.status(400).json({ error: 'This link is invalid or has expired. Please request a new one.' });
   res.json({ email: info.email, name: info.name, purpose: info.purpose });
-});
+}));
 
-app.post('/api/auth/set-password', tokenLimiter, handle('AUTH', (req, res) => {
+app.post('/api/auth/set-password', tokenLimiter, handle('AUTH', async (req, res) => {
   const pw = password(req.body);
   const name = personName(req.body, 'name', 'Your name');
-  const info = auth.consumeEmailToken(req.body.token);
+  const info = await auth.consumeEmailToken(req.body.token);
   if (!info) return res.status(400).json({ error: 'This link is invalid or has expired. Please request a new one.' });
-  db.prepare(`
-    UPDATE users SET password_hash = ?, name = COALESCE(?, name), email_verified_at = COALESCE(email_verified_at, datetime('now'))
-    WHERE id = ?`).run(auth.hashPassword(pw), name, info.user_id);
-  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(info.user_id); // sign out everywhere else
-  auth.createSession(res, info.user_id, SECURE_COOKIES);
-  const row = db.prepare('SELECT id, name, email, is_staff FROM users WHERE id = ?').get(info.user_id);
+  const hash = await auth.hashPassword(pw);
+  await db.tx(async (t) => {
+    await t.run(`
+      UPDATE users SET password_hash = $1, name = COALESCE($2, name), email_verified_at = COALESCE(email_verified_at, now())
+      WHERE id = $3`, [hash, name, info.user_id]);
+    await t.run('DELETE FROM sessions WHERE user_id = $1', [info.user_id]); // sign out everywhere else
+  });
+  await auth.createSession(res, info.user_id, SECURE_COOKIES);
+  const row = await db.one('SELECT id, name, email, is_staff FROM users WHERE id = $1', [info.user_id]);
   res.json({ user: auth.publicUser(row) });
 }));
 
-app.post('/api/auth/login', loginLimiter, handle('AUTH', (req, res) => {
+app.post('/api/auth/login', loginLimiter, handle('AUTH', async (req, res) => {
   const em = text(req.body, 'email', 'Email', { required: true, max: 254 });
   const pw = typeof req.body.password === 'string' ? req.body.password : '';
-  const row = db.prepare('SELECT id, name, email, is_staff, password_hash, email_verified_at FROM users WHERE email = ?').get(em);
-  const ok = auth.checkPassword(pw, row && row.email_verified_at ? row.password_hash : auth.DUMMY_HASH);
+  const row = await db.one(
+    'SELECT id, name, email, is_staff, password_hash, email_verified_at FROM users WHERE lower(email) = lower($1)', [em]);
+  const ok = await auth.checkPassword(pw, row && row.email_verified_at ? row.password_hash : auth.DUMMY_HASH);
   if (!row || !row.email_verified_at || !pw || !ok) {
     return res.status(401).json({ error: 'Email or password is incorrect.' });
   }
-  auth.createSession(res, row.id, SECURE_COOKIES);
+  await auth.createSession(res, row.id, SECURE_COOKIES);
   res.json({ user: auth.publicUser(row) });
 }));
 
-app.post('/api/auth/logout', (req, res) => {
-  auth.destroySession(req, res);
+app.post('/api/auth/logout', handle('AUTH', async (req, res) => {
+  await auth.destroySession(req, res);
   res.json({ ok: true });
-});
+}));
 
 // ---- projects ---------------------------------------------------------------
-app.get('/api/projects', handle('PROJECTS', (req, res) => {
+app.get('/api/projects', handle('PROJECTS', async (req, res) => {
   // Security-sensitive projects are only sent to signed-in users; the public never receives them.
-  const projects = db.prepare(`
+  // ($1 is true for signed-in users, which shows every project.)
+  const projects = await db.query(`
     SELECT p.*, s.name AS verified_by_name
     FROM projects p LEFT JOIN users s ON s.id = p.verified_by
-    ${req.user ? '' : 'WHERE p.security_sensitive IS NOT 1'}
-    ORDER BY p.created_at DESC, p.id DESC`).all();
-  const requests = db.prepare('SELECT * FROM work_requests ORDER BY created_at ASC').all();
+    WHERE $1 OR p.security_sensitive IS DISTINCT FROM 1
+    ORDER BY p.created_at DESC, p.id DESC`, [!!req.user]);
+  const shownIds = projects.map((p) => p.id);
+  const requests = await db.query(
+    'SELECT * FROM work_requests WHERE project_id = ANY($1::int[]) ORDER BY created_at ASC, id ASC', [shownIds]);
   const isStaff = !!(req.user && req.user.is_staff);
   const byProject = new Map();
   for (const r of requests) {
@@ -289,7 +308,7 @@ app.get('/api/projects', handle('PROJECTS', (req, res) => {
 }));
 
 // Submitting needs an account; viewing the list (GET above) and requesting to work on a project stay open.
-app.post('/api/projects', submitLimiter, auth.requireUser, handle('PROJECTS', (req, res) => {
+app.post('/api/projects', submitLimiter, auth.requireUser, handle('PROJECTS', async (req, res) => {
   const b = req.body || {};
   const multipleTeams = yesNo(b, 'multiple_teams', 'Can more than one team work on this project?', { required: true });
   const securitySensitive = yesNo(b, 'security_sensitive', 'Is this project security-sensitive?', { required: true });
@@ -316,26 +335,28 @@ app.post('/api/projects', submitLimiter, auth.requireUser, handle('PROJECTS', (r
     promo_use: oneOf(b, 'promo_use', 'Use in promotional material', PROMO_CHOICES, { required: true }),
     created_by: req.user.id,
   };
+  // Column names come from the fixed list above (never from the request); values go in as $1, $2, ...
   const cols = Object.keys(fields);
-  const r = db.prepare(`INSERT INTO projects (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
-    .run(...Object.values(fields));
-  res.status(201).json({ id: Number(r.lastInsertRowid) });
+  const row = await db.one(
+    `INSERT INTO projects (${cols.join(', ')}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING id`,
+    Object.values(fields));
+  res.status(201).json({ id: row.id });
 }));
 
-app.post('/api/projects/:id/verify', auth.requireStaff, handle('VERIFY', (req, res) => {
+app.post('/api/projects/:id/verify', auth.requireStaff, handle('VERIFY', async (req, res) => {
   const id = idParam(req);
   if (!id) return res.status(404).json({ error: 'Project not found.' });
   const verified = req.body && req.body.verified === true;
   const r = verified
-    ? db.prepare("UPDATE projects SET verified_by = ?, verified_at = datetime('now') WHERE id = ?").run(req.user.id, id)
-    : db.prepare('UPDATE projects SET verified_by = NULL, verified_at = NULL WHERE id = ?').run(id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Project not found.' });
+    ? await db.run('UPDATE projects SET verified_by = $1, verified_at = now() WHERE id = $2', [req.user.id, id])
+    : await db.run('UPDATE projects SET verified_by = NULL, verified_at = NULL WHERE id = $1', [id]);
+  if (r.rowCount === 0) return res.status(404).json({ error: 'Project not found.' });
   res.json({ ok: true, verified });
 }));
 
-app.post('/api/projects/:id/requests', submitLimiter, handle('REQUESTS', (req, res) => {
+app.post('/api/projects/:id/requests', submitLimiter, handle('REQUESTS', async (req, res) => {
   const id = idParam(req);
-  const project = id && db.prepare('SELECT security_sensitive FROM projects WHERE id = ?').get(id);
+  const project = id && await db.one('SELECT security_sensitive FROM projects WHERE id = $1', [id]);
   // Signed-out visitors can't see security-sensitive projects, so they can't request them either.
   if (!project || (project.security_sensitive === 1 && !req.user)) {
     return res.status(404).json({ error: 'Project not found.' });
@@ -349,10 +370,11 @@ app.post('/api/projects/:id/requests', submitLimiter, handle('REQUESTS', (req, r
   const contact = email(b, 'contact_email', 'Contact email');
   if (!start && !end && !timeframe) throw new InputError('Give the event dates or describe the timeframe.');
   if (start && end && end < start) throw new InputError('End date must be on or after the start date.');
-  const r = db.prepare(`
+  const row = await db.one(`
     INSERT INTO work_requests (project_id, organization, participants, start_date, end_date, timeframe, contact_email, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, organization, participants, start, end, timeframe, contact, req.user ? req.user.id : null);
-  res.status(201).json({ id: Number(r.lastInsertRowid) });
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+    [id, organization, participants, start, end, timeframe, contact, req.user ? req.user.id : null]);
+  res.status(201).json({ id: row.id });
 }));
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
@@ -376,7 +398,8 @@ app.use((err, _req, res, _next) => {
   res.status(status >= 400 && status < 600 ? status : 500).json({ error: message });
 });
 
-app.listen(PORT, () => {
+// Create any missing tables, then start taking requests.
+db.init().then(() => app.listen(PORT, () => {
   console.log(`[SERVER] Project Enhancements on http://localhost:${PORT}`);
   if (process.env.NODE_ENV === 'production' && !process.env.APP_URL) {
     console.error('[SERVER] APP_URL is not set: emailed sign-up and reset links will point at localhost.');
@@ -386,4 +409,7 @@ app.listen(PORT, () => {
       ? '[MAIL] SMTP_HOST is not set: people cannot create accounts or reset passwords.'
       : '[MAIL] SMTP_HOST is not set: account emails will be printed here instead of sent.');
   }
+})).catch((err) => {
+  console.error('[DB] Could not connect to PostgreSQL or set up tables:', err.message);
+  process.exit(1);
 });

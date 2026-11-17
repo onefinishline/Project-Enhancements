@@ -5,11 +5,12 @@ import { PROMO_LABELS } from './Submit.jsx';
 
 const yesNoText = (v) => (v === 1 ? 'Yes' : v === 0 ? 'No' : '');
 
-// SQLite timestamps are UTC ("YYYY-MM-DD HH:MM:SS"); plain dates ("YYYY-MM-DD") are calendar days in local time.
+// Timestamps arrive as ISO strings with a time zone ("2026-11-17T15:22:30.000Z"); plain dates ("YYYY-MM-DD")
+// are calendar days, shown as that day wherever the reader is.
 const fmtDate = (s) => {
   if (!s) return '';
-  const d = s.length > 10 ? new Date(s.replace(' ', 'T') + 'Z') : new Date(s + 'T00:00');
-  return d.toLocaleDateString();
+  const d = s.length > 10 ? new Date(s) : new Date(s + 'T00:00');
+  return isNaN(d) ? '' : d.toLocaleDateString();
 };
 
 export default function Projects({ user }) {
