@@ -1,0 +1,21 @@
+{
+  "name": "project-enhancements",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Collects enhancement proposals for current projects and matches them with teams who want to build them.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "dev:client": "npm --prefix client run dev",
+    "build": "npm --prefix client install && npm --prefix client run build",
+    "make-staff": "node --env-file-if-exists=.env scripts/make-staff.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "nodemailer": "^6.10.1"
+  }
+}
