@@ -6,7 +6,7 @@
 # Snapshots the working folder into a commit on backup/daily without touching your files,
 # your staged changes, or the branch you are on. Every local branch is linked in, so commits on
 # branches that aren't checked out are backed up too. Files in .gitignore are never included,
-# and the app database and local credentials (data/, *.db*, .env) are always left out,
+# and the app database and local settings files with passwords (data/, *.db*, .env, .env.*) are always left out,
 # even on branches whose .gitignore predates those rules.
 # Skips the push when nothing changed. Log: logs\backup.log.
 # -NoPush builds the snapshot on a local test branch (backup/daily-test) and pushes nothing.
@@ -34,7 +34,7 @@ try {
   $env:GIT_INDEX_FILE = $tmpIndex
   Invoke-Git read-tree HEAD | Out-Null
   Invoke-Git add -A | Out-Null
-  Invoke-Git rm -r -q --cached --ignore-unmatch -- data '*.db' '*.db-wal' '*.db-shm' .env | Out-Null
+  Invoke-Git rm -r -q --cached --ignore-unmatch -- data '*.db' '*.db-wal' '*.db-shm' .env '.env.*' ':!.env.example' | Out-Null
   $tree = Invoke-Git write-tree
   Remove-Item Env:\GIT_INDEX_FILE
   Remove-Item -Force $tmpIndex -ErrorAction SilentlyContinue

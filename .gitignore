@@ -4,3 +4,6 @@ data/
 *.log
 client/dist/
 logs/
+# Any local settings file (they hold passwords); only the blank template is shared
+.env.*
+!.env.example
