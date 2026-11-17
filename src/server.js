@@ -11,6 +11,7 @@ const PORT = Number(process.env.PORT) || 3100;
 const SECURE_COOKIES = process.env.NODE_ENV === 'production';
 
 app.disable('x-powered-by');
+// Exactly one proxy (nginx) sits in front: visitor IPs (for rate limits) come from its X-Forwarded-For header.
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '100kb' }));
 // Content-Security-Policy: the browser only runs this site's own script files (never inline or injected code),
@@ -399,8 +400,11 @@ app.use((err, _req, res, _next) => {
 });
 
 // Create any missing tables, then start taking requests.
-db.init().then(() => app.listen(PORT, () => {
-  console.log(`[SERVER] Project Enhancements on http://localhost:${PORT}`);
+// Listens only on this machine by default: in production nginx is the one public entry point (HTTPS),
+// so nobody can reach the app directly over plain HTTP. Set HOST=0.0.0.0 only if you really need that.
+const HOST = process.env.HOST || '127.0.0.1';
+db.init().then(() => app.listen(PORT, HOST, () => {
+  console.log(`[SERVER] Project Enhancements on http://${HOST}:${PORT}`);
   if (process.env.NODE_ENV === 'production' && !process.env.APP_URL) {
     console.error('[SERVER] APP_URL is not set: emailed sign-up and reset links will point at localhost.');
   }

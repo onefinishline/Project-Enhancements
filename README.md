@@ -68,6 +68,10 @@ PostgreSQL already has data, and never changes the SQLite file.
 
 Development (hot reload): `npm run dev` (API on :3100) and `npm run dev:client` (Vite on :5173, proxies `/api`).
 
+## Deploying
+Production runs behind nginx with HTTPS (Let's Encrypt). Step-by-step guide, nginx config and systemd service:
+[`deploy/DEPLOY.md`](deploy/DEPLOY.md).
+
 ## Config (`.env`, see `.env.example`)
 `npm start` / `npm run dev` read `.env` automatically.
 - `DATABASE_URL` (**required**): `postgres://USER:PASSWORD@HOST:5432/DATABASE`. Set `PGSSL=true` if the server requires TLS.

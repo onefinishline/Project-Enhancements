@@ -1,0 +1,34 @@
+# systemd service: keeps the Node app running, restarts it if it stops, starts it at boot.
+# Install: /etc/systemd/system/project-enhancements.service   (see deploy/DEPLOY.md)
+[Unit]
+Description=Project Enhancements (Node.js app behind nginx)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=enhancements
+Group=enhancements
+WorkingDirectory=/opt/project-enhancements
+# Settings (DATABASE_URL, SMTP_*, APP_URL, ...) are read from /opt/project-enhancements/.env
+ExecStart=/usr/bin/node --env-file=.env src/server.js
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=3100
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the app writes nothing to disk (data is in PostgreSQL, logs go to the journal),
+# so the whole filesystem is read-only to it.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
